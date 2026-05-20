@@ -11,7 +11,10 @@ CS_DB_NAME='columnstore_bts'
 MARIADB_BIN=$(which mariadb)
 CPIMPORT_BIN=$(command -v cpimport || true)
 CONN_FLAGS=("$@")
-MAX_PARALLEL=6 # Adjust based on your Cloud Instance CPU/IO limits
+# Tunables for the parallel flights load. We pre-split flights.csv into NUM_CHUNKS
+# files and feed at most MAX_PARALLEL of them to LOAD DATA LOCAL INFILE at a time.
+NUM_CHUNKS=8
+MAX_PARALLEL=4 # Adjust based on your Cloud Instance CPU/IO limits
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -92,11 +95,10 @@ load_small_table() {
 }
 
 load_flights_chunk() {
-    # load_flights_chunk <start_line> <end_line>
-    local start=$1 end=$2
-    sed -n "${start},${end}p" "${SCHEMA_DIR}/flights.csv" | \
-        "$MARIADB_BIN" --local-infile=1 "${CONN_FLAGS[@]}" --init-command="$INIT_CMD" --database="$DB_NAME" \
-            -e "LOAD DATA LOCAL INFILE '/dev/stdin' INTO TABLE flights FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\n' ${FLIGHTS_LOAD_COLUMNS};"
+    # load_flights_chunk <chunk_file>
+    local file=$1
+    "$MARIADB_BIN" --local-infile=1 "${CONN_FLAGS[@]}" --init-command="$INIT_CMD" --database="$DB_NAME" \
+        -e "LOAD DATA LOCAL INFILE '${file}' INTO TABLE flights FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' LINES TERMINATED BY '\n' ${FLIGHTS_LOAD_COLUMNS};"
 }
 
 FLIGHTS_LOAD_COLUMNS="(\`year\`, \`month\`, \`day\`, \`day_of_week\`, \`fl_date\`, \`carrier\`, \`tail_num\`, \`fl_num\`, \`origin\`, \`dest\`, \`crs_dep_time\`, \`dep_time\`, \`dep_delay\`, \`taxi_out\`, \`wheels_off\`, \`wheels_on\`, \`taxi_in\`, \`crs_arr_time\`, \`arr_time\`, \`arr_delay\`, \`cancelled\`, \`cancellation_code\`, \`diverted\`, \`crs_elapsed_time\`, \`actual_elapsed_time\`, \`air_time\`, \`distance\`, \`carrier_delay\`, \`weather_delay\`, \`nas_delay\`, \`security_delay\`, \`late_aircraft_delay\`, @unused_trailing_field)"
@@ -190,34 +192,39 @@ done
 
 # Configuration
 TOTAL_ROWS=$(wc -l < "${SCHEMA_DIR}/flights.csv" | tr -d ' ')
-CHUNK_SIZE=1000000
-NUM_CHUNKS=$(( (TOTAL_ROWS + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+DATA_ROWS=$(( TOTAL_ROWS - 1 )) # exclude header
+LINES_PER_CHUNK=$(( (DATA_ROWS + NUM_CHUNKS - 1) / NUM_CHUNKS ))
 FLIGHTS_SIZE=$(get_filesize "${SCHEMA_DIR}/flights.csv")
 
 echo
-echo -e "${BLUE}Loading flights.csv (${TOTAL_ROWS} rows, $(format_bytes "$FLIGHTS_SIZE")) in ${NUM_CHUNKS} chunks of up to ${YELLOW}${CHUNK_SIZE} rows.${NC}"
-echo -e "${BLUE}Parallel workers: ${MAX_PARALLEL}${NC}"
+echo -e "${BLUE}Pre-splitting flights.csv (${TOTAL_ROWS} rows, $(format_bytes "$FLIGHTS_SIZE")) into ${NUM_CHUNKS} chunks of up to ${YELLOW}${LINES_PER_CHUNK} rows${BLUE}...${NC}"
+SPLIT_START=$(date +%s)
+rm -rf "$TMP_SPLIT_DIR"
+mkdir -p "$TMP_SPLIT_DIR"
+# Strip header before splitting so no chunk carries the column-name row.
+tail -n +2 "${SCHEMA_DIR}/flights.csv" | split -l "$LINES_PER_CHUNK" - "${TMP_SPLIT_DIR}/chunk_"
+mapfile -t CHUNK_FILES < <(ls "${TMP_SPLIT_DIR}"/chunk_*)
+ACTUAL_CHUNKS=${#CHUNK_FILES[@]}
+echo -e "${GREEN}Split complete${NC} (${ACTUAL_CHUNKS} files, $(elapsed "$SPLIT_START"))"
+echo -e "${BLUE}Loading ${ACTUAL_CHUNKS} chunks with up to ${MAX_PARALLEL} parallel workers...${NC}"
 
 # Per-chunk failure log: subshells append a line here when a chunk gives up after retries.
 FAIL_LOG=$(mktemp)
 trap 'rm -f "$FAIL_LOG"' EXIT
 
-for (( i=0; i<$NUM_CHUNKS; i++ )); do
-    START=$(( i * CHUNK_SIZE + 1 ))
-    END=$(( (i + 1) * CHUNK_SIZE ))
-    if [[ "$END" -gt "$TOTAL_ROWS" ]]; then
-        END=$TOTAL_ROWS
-    fi
+for (( i=0; i<ACTUAL_CHUNKS; i++ )); do
+    CHUNK_FILE="${CHUNK_FILES[i]}"
+    CHUNK_NAME=$(basename "$CHUNK_FILE")
     CHUNK_NUM=$(( i + 1 ))
 
     (
         CHUNK_START=$(date +%s)
-        echo -e "${YELLOW}Starting flights chunk ${CHUNK_NUM}/${NUM_CHUNKS} rows ${START}-${END}${NC}"
-        if retry "chunk ${CHUNK_NUM}/${NUM_CHUNKS}" load_flights_chunk "$START" "$END"; then
-            echo -e "${GREEN}Finished flights chunk ${CHUNK_NUM}/${NUM_CHUNKS}${NC} ($(elapsed "$CHUNK_START"))"
+        echo -e "${YELLOW}Starting flights chunk ${CHUNK_NUM}/${ACTUAL_CHUNKS} (${CHUNK_NAME}, $(format_bytes "$(get_filesize "$CHUNK_FILE")"))${NC}"
+        if retry "chunk ${CHUNK_NUM}/${ACTUAL_CHUNKS}" load_flights_chunk "$CHUNK_FILE"; then
+            echo -e "${GREEN}Finished flights chunk ${CHUNK_NUM}/${ACTUAL_CHUNKS}${NC} ($(elapsed "$CHUNK_START"))"
         else
-            echo -e "${RED}Chunk ${CHUNK_NUM}/${NUM_CHUNKS} (rows ${START}-${END}) failed after ${MAX_RETRIES} attempts${NC}"
-            echo "${CHUNK_NUM} ${START} ${END}" >> "$FAIL_LOG"
+            echo -e "${RED}Chunk ${CHUNK_NUM}/${ACTUAL_CHUNKS} (${CHUNK_NAME}) failed after ${MAX_RETRIES} attempts${NC}"
+            echo "${CHUNK_NUM} ${CHUNK_NAME}" >> "$FAIL_LOG"
         fi
     ) &
 
@@ -233,10 +240,10 @@ wait
 if [[ -s "$FAIL_LOG" ]]; then
     FAILED_COUNT=$(wc -l < "$FAIL_LOG" | tr -d ' ')
     echo -e "${RED}${FAILED_COUNT} chunk(s) failed after ${MAX_RETRIES} retries:${NC}"
-    while read -r CN ST EN; do
-        echo -e "  chunk ${CN}: rows ${ST}-${EN}"
+    while read -r CN CNAME; do
+        echo -e "  chunk ${CN}: ${CNAME}"
     done < "$FAIL_LOG"
-    echo -e "${YELLOW}Hint: lower MAX_PARALLEL (currently ${MAX_PARALLEL}) and/or CHUNK_SIZE (currently ${CHUNK_SIZE}) and rerun.${NC}"
+    echo -e "${YELLOW}Hint: lower MAX_PARALLEL (currently ${MAX_PARALLEL}) and/or increase NUM_CHUNKS (currently ${NUM_CHUNKS}) and rerun.${NC}"
     echo -e "${YELLOW}Note: the script is idempotent for schema (DROP+CREATE) but NOT for chunked data — partial chunks may have rolled back, but successful chunks remain. Truncate \`${DB_NAME}.flights\` before rerunning to avoid duplicates.${NC}"
     exit 1
 fi
