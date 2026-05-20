@@ -8,7 +8,7 @@ This simple data set uses the [on time performance](https://www.transtats.bts.go
 
 ## Prerequisite
 
-A MariaDB server with ColumnStore enabled is required. For a quick test environment, try our [docker project](https://hub.docker.com/r/mariadb/columnstore).  
+A MariaDB server is required. For a quick test environment, try [MariaDB Cloud](https://cloud.mariadb.com/).  
 
 ## Quick Start
 ### Clone The Repo
@@ -47,7 +47,7 @@ or
 mariadb -vvv innodb_bts < queries/1.sql
 ```
 
-## InnoDB vs ColumnStore Comparison
+## InnoDB vs Analytics Comparison
 
 ### Environment
 |Metric                |Value                |
