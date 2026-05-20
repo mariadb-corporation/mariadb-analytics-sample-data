@@ -4,7 +4,7 @@ SELECT `dest`,
        CAST(LEFT(`crs_arr_time`, 2) AS int) AS `scheduled_arrival_hr`,
        AVG(`arr_delay`) AS `avg_arr_delay`,
        MAX(`arr_delay`) AS `max_arr_delay`
-FROM `flights`
+FROM `innodb_bts`.`flights`
 WHERE `dest` IN ('SFO',
                  'OAK',
                  'SJC')

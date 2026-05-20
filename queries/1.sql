@@ -9,8 +9,8 @@ FROM
             COUNT(*) AS `volume`,
             SUM(`diverted`) AS `diverted`,
             SUM(`cancelled`) AS `cancelled`
-     FROM `flights` `f`
-     JOIN `airlines` `a` ON `f`.`carrier` = `a`.`iata_code`
+     FROM `innodb_bts`.`flights` `f`
+     JOIN `innodb_bts`.`airlines` `a` ON `f`.`carrier` = `a`.`iata_code`
      WHERE `f`.`year` = 2020
      GROUP BY `a`.`airline`) AS `q`
 ORDER BY `flight_count` DESC;

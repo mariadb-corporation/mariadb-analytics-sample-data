@@ -24,6 +24,7 @@ CREATE TABLE `airports` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci;
 
 CREATE TABLE `flights` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `year` smallint(6) DEFAULT NULL,
   `month` tinyint(4) DEFAULT NULL,
   `day` tinyint(4) DEFAULT NULL,
@@ -56,6 +57,7 @@ CREATE TABLE `flights` (
   `nas_delay` decimal(13,2) DEFAULT NULL,
   `security_delay` decimal(13,2) DEFAULT NULL,
   `late_aircraft_delay` decimal(13,2) DEFAULT NULL,
+  PRIMARY KEY (`id`),
   KEY `carrier` (`carrier`),
   KEY `year` (`year`),
   KEY `carrier_delay` (`carrier_delay`),
