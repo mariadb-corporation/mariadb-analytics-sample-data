@@ -16,10 +16,10 @@ A MariaDB server with ColumnStore enabled is required. For a quick test environm
 cd /tmp
 ```
 ```
-git clone https://github.com/mariadb-corporation/mariadb-columnstore-sample-data.git
+git clone https://github.com/mariadb-corporation/mariadb-analytics-sample-data.git
 ```
 ```
-cd mariadb-columnstore-sample-data
+cd mariadb-analytics-sample-data
 ```
 ### Run The Project
 ```
